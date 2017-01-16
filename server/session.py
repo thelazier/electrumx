@@ -125,7 +125,11 @@ class ElectrumX(SessionBase):
             'server.features': self.server_features,
             'server.peers.subscribe': self.peers_subscribe,
             'server.version': self.server_version,
+            'masternode.announce.broadcast': self.masternode_announce_broadcast,
+            'masternode.subscribe': self.masternode_subscribe,
         }
+        self.subscribe_mns = False
+        self.mns = set()
 
     def sub_count(self):
         return len(self.hashX_subs)
@@ -175,6 +179,17 @@ class ElectrumX(SessionBase):
                 es = '' if len(changed) == 1 else 'es'
                 self.log_info('notified of {:,d} address{}'
                               .format(len(changed), es))
+
+        if self.subscribe_mns:
+            for masternode in self.mns:
+                status = await self.daemon.masternode_list(['status', masternode])
+                payload = {
+                    'id': None,
+                    'method': 'masternode.subscribe',
+                    'params': [masternode],
+                    'result': status.get(masternode),
+                }
+                self.send_binary(self.encode_payload(payload))
 
     def height(self):
         '''Return the current flushed database height.'''
@@ -331,6 +346,9 @@ class ElectrumX(SessionBase):
             self.client = str(client_name)[:17]
         if protocol_version is not None:
             self.protocol_version = protocol_version
+        # Fake response for Electrum-Dash 2.6.4
+        if self.client == '2.6.4':
+            return '1.0'
         return version.VERSION
 
     async def transaction_broadcast(self, raw_tx):
@@ -370,6 +388,35 @@ class ElectrumX(SessionBase):
         if not handler:
             handler = self.controller.electrumx_handlers.get(method)
         return handler
+
+    # Masternode command handlers
+    async def masternode_announce_broadcast(self, signmnb):
+        '''Pass through the parameters to the daemon.
+
+        An ugly API: current Electrum clients only pass the masternode
+        broadcast message in hex and expect error messages to be returned in
+        the result field.  And the server shouldn't be doing the client's
+        user interface job here.
+        '''
+        try:
+            mnb_info = await self.daemon.masternode_broadcast(['relay',signmnb])
+            return mnb_info
+        except DaemonError as e:
+            error = e.args[0]
+            message = error['message']
+            self.log_info('masternode_broadcast: {}'.format(message))
+            return (
+                'The masternode broadcast was rejected.  ({})\n[{}]'
+                .format(message, signmnb)
+            )
+
+    async def masternode_subscribe(self, vin):
+        '''Returns the status of masternode.'''
+        result = await self.daemon.masternode_list(['status',vin])
+        if result is not None:
+            self.mns.add(vin)
+            self.subscribe_mns = True
+        return result.get(vin)
 
 
 class LocalRPC(SessionBase):
