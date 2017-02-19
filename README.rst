@@ -8,7 +8,7 @@ ElectrumX - Reimplementation of electrum-server
 ===============================================
 
   :Licence: MIT
-  :Language: Python (>= 3.5)
+  :Language: Python (>= 3.5.1)
   :Author: Neil Booth
 
 Getting Started
@@ -42,6 +42,7 @@ Features
 - Daemon failover.  More than one daemon can be specified, and
   ElectrumX will failover round-robin style if the current one fails
   for any reason.
+- peer discovery protocol removes need for IRC
 - Coin abstraction makes compatible altcoin and testnet support easy.
 
 Motivation
@@ -110,30 +111,84 @@ Python's ``asyncio`` means ElectrumX has no (direct) use for threads
 and associated complications.
 
 
-Roadmap Pre-1.0
-===============
-
-- minor code cleanups.
-- implement simple protocol to discover peers without resorting to IRC.
-
-Roadmap Post-1.0
-================
+Roadmap
+=======
 
 - Python 3.6, which has several performance improvements relevant to
   ElectrumX
 - UTXO root logic and implementation
+- incremental history serving / pruning
+- potential new functionality such as adding label server
 - potentially move some functionality to C or C++
 
 
 Database Format
 ===============
 
-The database format of ElectrumX is unlikely to change from the 0.10.0
-version prior to the release of 1.0.
+The database format of ElectrumX will not change from the 0.10.0
+version for the release of 1.0.
 
 
 ChangeLog
 =========
+
+Version 0.99
+------------
+
+Preparation for release of 1.0, which will only have bug fixes and
+documentation updates.
+
+* improve handling of daemon going down so that incoming connections
+  are not blocked.  Also improve logging thereof.  Fixes `#100`_.
+* add facility to disable peer discovery and/or self announcement,
+  see `docs/ENVIRONMENT.rst`_.
+* add FairCoin (thokon00)
+
+Version 0.11.4
+--------------
+
+* peer handling fixes / improvements based on suggestions of hsmiths
+
+Version 0.11.3
+--------------
+
+* fixed a typo in lib/peer.py pointed out by hsmiths
+
+Version 0.11.2
+--------------
+
+* Preliminary implementation of script hash subscriptions to enable
+  subscribing to updates of arbitrary scripts, not just those of
+  standard bitcoin addresses.  I'll fully document once confirmed
+  working as expected.
+  Closes `#124`_.
+
+Version 0.11.1
+--------------
+
+* report unconfirmed parent tx status correctly, and notify if that
+  parent status changes.  Fixes `#129`_.
+
+Version 0.11.0
+--------------
+
+* implementation of `docs/PEER_DISCOVERY.rst`_ for discovery of server
+  peers without using IRC.  Closes `#104`_.  Since all testnet peers
+  are ElectrumX servers, IRC advertising is now disabled on bitcoin
+  testnet.
+
+  Thanks to bauerj, hsmiths and JWU42 for their help testing these
+  changes over the last month.
+* you can now specify a tor proxy (or have it autodetected if local),
+  and if an incoming connection seems to be from the proxy a
+  tor-specific banner file is served.  See **TOR_BANNER_FILE** in
+  `docs/ENVIRONMENT.rst`_.
+
+Version 0.10.19
+---------------
+
+* update `docs/PEER_DISCOVERY.rst`_
+* accept IPv6 addresses in DAEMON_URL (fixes `#126`_)
 
 Version 0.10.18
 ---------------
@@ -306,7 +361,12 @@ stability please stick with the 0.9 series.
 .. _#101: https://github.com/kyuupichan/electrumx/issues/101
 .. _#102: https://github.com/kyuupichan/electrumx/issues/102
 .. _#103: https://github.com/kyuupichan/electrumx/issues/103
+.. _#104: https://github.com/kyuupichan/electrumx/issues/104
 .. _#110: https://github.com/kyuupichan/electrumx/issues/110
 .. _#111: https://github.com/kyuupichan/electrumx/issues/111
+.. _#124: https://github.com/kyuupichan/electrumx/issues/124
+.. _#126: https://github.com/kyuupichan/electrumx/issues/126
+.. _#129: https://github.com/kyuupichan/electrumx/issues/129
 .. _docs/HOWTO.rst: https://github.com/kyuupichan/electrumx/blob/master/docs/HOWTO.rst
+.. _docs/ENVIRONMENT.rst: https://github.com/kyuupichan/electrumx/blob/master/docs/ENVIRONMENT.rst
 .. _docs/PEER_DISCOVERY.rst: https://github.com/kyuupichan/electrumx/blob/master/docs/PEER_DISCOVERY.rst

@@ -26,13 +26,9 @@ class RPCClient(JSONSession):
         super().__init__(version=JSONRPCv2)
         self.max_send = 0
         self.max_buffer_size = 5*10**6
-        self.event = asyncio.Event()
-
-    def have_pending_items(self):
-        self.event.set()
 
     async def wait_for_response(self):
-        await self.event.wait()
+        await self.items_event.wait()
         await self.process_pending_items()
 
     def send_rpc_request(self, method, params):
@@ -40,12 +36,9 @@ class RPCClient(JSONSession):
         self.send_request(handler, method, params)
 
     def handle_response(self, method, result, error):
-        if method in ('groups', 'sessions') and not error:
-            if method == 'groups':
-                lines = Controller.groups_text_lines(result)
-            else:
-                lines = Controller.sessions_text_lines(result)
-            for line in lines:
+        if method in ('groups', 'peers', 'sessions') and not error:
+            lines_func = getattr(Controller, '{}_text_lines'.format(method))
+            for line in lines_func(result):
                 print(line)
         elif error:
             print('error: {} (code {:d})'
@@ -74,7 +67,7 @@ def rpc_send_and_wait(port, method, params, timeout=15):
 
 def main():
     '''Send the RPC command to the server and print the result.'''
-    parser = argparse.ArgumentParser('Send electrumx an RPC command' )
+    parser = argparse.ArgumentParser('Send electrumx an RPC command')
     parser.add_argument('-p', '--port', metavar='port_num', type=int,
                         help='RPC port number')
     parser.add_argument('command', nargs=1, default=[],
