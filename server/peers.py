@@ -25,7 +25,7 @@ import server.version as version
 
 PEERS_FILE = 'peers'
 PEER_GOOD, PEER_STALE, PEER_NEVER, PEER_BAD = range(4)
-STALE_SECS = 86400
+STALE_SECS = 3600 #86400
 WAKEUP_SECS = 300
 
 
@@ -112,14 +112,17 @@ class PeerSession(JSONSession):
 
         self.peer_mgr.add_peers(peers)
 
+        # Announce ourself if not present.  Don't if disabled or we
+        # are a non-public IP address.
         if not self.peer_mgr.env.peer_announce:
             return
-
-        # Announce ourself if not present
         my = self.peer_mgr.my_clearnet_peer()
+        if not my.is_public:
+            return
         for peer in my.matches(peers):
             if peer.tcp_port == my.tcp_port and peer.ssl_port == my.ssl_port:
                 return
+
         self.log_info('registering ourself with server.add_peer')
         self.send_request(self.on_add_peer, 'server.add_peer', [my.features])
 
@@ -216,7 +219,7 @@ class PeerManager(util.LoggedClass):
         self.irc = IRC(env, self)
         self.myselves = peers_from_env(env)
         # value is max outgoing connections at a time
-        self.semaphore = asyncio.BoundedSemaphore(value=8)
+        self.semaphore = asyncio.BoundedSemaphore(value=2)
         self.retry_event = asyncio.Event()
         # Peers have one entry per hostname.  Once connected, the
         # ip_addr property is either None, an onion peer, or the
@@ -228,6 +231,7 @@ class PeerManager(util.LoggedClass):
         self.tor_proxy = SocksProxy(env.tor_proxy_host, env.tor_proxy_port,
                                     loop=self.loop)
         self.import_peers()
+        self.conn_count = 0
 
     def my_clearnet_peer(self):
         '''Returns the clearnet peer representing this server.'''
@@ -307,8 +311,9 @@ class PeerManager(util.LoggedClass):
         '''Add peers from an incoming connection.'''
         peers = Peer.peers_from_features(features, source)
         if peers:
-            self.log_info('add_peer request received from {}'
-                          .format(peers[0].host))
+            hosts = [peer.host for peer in peers]
+            self.log_info('add_peer request from {} for {}'
+                          .format(source, ', '.join(hosts)))
             self.add_peers(peers, check_ports=True)
         return bool(peers)
 
@@ -469,6 +474,10 @@ class PeerManager(util.LoggedClass):
             if peer.bad or not pairs:
                 self.maybe_forget_peer(peer)
             else:
+                peer.conn_count = self.conn_count
+                self.conn_count += 1
+                self.log_info('preparing connection {:d} to {}'
+                              .format(peer.conn_count, peer))
                 start = time.time()
                 await self.semaphore.acquire()
                 elapsed = time.time() - start
@@ -512,9 +521,14 @@ class PeerManager(util.LoggedClass):
             else:
                 self.set_connection_status(peer, False)
                 self.semaphore.release()
+                self.log_info('connection {:d} to {} failed'
+                              .format(peer.conn_count, peer))
 
     def connection_lost(self, session):
         '''Called by the peer session when disconnected.'''
+        peer = session.peer
+        self.log_info('connection {:d} to {} closed'
+                      .format(peer.conn_count, peer))
         self.semaphore.release()
 
     def set_connection_status(self, peer, good):
