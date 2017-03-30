@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import ssl
+import random
 import time
 import traceback
 import warnings
@@ -21,6 +22,7 @@ import pylru
 
 from lib.jsonrpc import JSONRPC, JSONSessionBase, RPCError
 from lib.hash import double_sha256, hash_to_str, hex_str_to_hash
+from lib.peer import Peer
 import lib.util as util
 from server.block_processor import BlockProcessor
 from server.daemon import Daemon, DaemonError
@@ -73,7 +75,7 @@ class Controller(util.LoggedClass):
         env.max_send = max(350000, env.max_send)
         self.setup_bands()
         # Set up the RPC request handlers
-        cmds = ('daemon_url disconnect getinfo groups log peers reorg '
+        cmds = ('add_peer daemon_url disconnect getinfo groups log peers reorg '
                 'sessions stop'.split())
         self.rpc_handlers = {cmd: getattr(self, 'rpc_' + cmd) for cmd in cmds}
         # Set up the ElectrumX request handlers
@@ -502,10 +504,12 @@ class Controller(util.LoggedClass):
                          'Tries', 'Source', 'IP Address')
         for item in data:
             features = item['features']
-            yield fmt.format(item['host'][:30],
+            hostname = item['host']
+            host = features['hosts'][hostname]
+            yield fmt.format(hostname[:30],
                              item['status'],
-                             features['tcp_port'] or '',
-                             features['ssl_port'] or '',
+                             host.get('tcp_port') or '',
+                             host.get('ssl_port') or '',
                              features['server_version'] or 'unknown',
                              features['protocol_min'],
                              features['protocol_max'],
@@ -578,6 +582,15 @@ class Controller(util.LoggedClass):
         return result
 
     # Local RPC command handlers
+
+    def rpc_add_peer(self, real_name):
+        '''Add a peer.
+
+        real_name: a real name, as would appear on IRC
+        '''
+        peer = Peer.from_real_name(real_name, 'RPC')
+        self.peer_mgr.add_peers([peer])
+        return "peer '{}' added".format(real_name)
 
     def rpc_disconnect(self, session_ids):
         '''Disconnect sesssions.

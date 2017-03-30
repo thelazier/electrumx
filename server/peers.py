@@ -14,6 +14,7 @@ import ssl
 import time
 from collections import defaultdict, Counter
 from functools import partial
+from socket import SOCK_STREAM
 
 from lib.jsonrpc import JSONSession
 from lib.peer import Peer
@@ -56,6 +57,8 @@ class PeerSession(JSONSession):
         self.peer_mgr = peer_mgr
         self.kind = kind
         self.failed = False
+        self.bad = False
+        self.remote_peers = None
         self.log_prefix = '[{}] '.format(self.peer)
 
     async def wait_on_items(self):
@@ -80,6 +83,8 @@ class PeerSession(JSONSession):
         self.send_request(self.on_version, 'server.version',
                           [version.VERSION, proto_ver])
         self.send_request(self.on_features, 'server.features')
+        self.send_request(self.on_headers, 'blockchain.headers.subscribe')
+        self.send_request(self.on_peers_subscribe, 'server.peers.subscribe')
 
     def connection_lost(self, exc):
         '''Handle disconnection.'''
@@ -92,71 +97,25 @@ class PeerSession(JSONSession):
             self.failed = True
             self.log_error('server.peers.subscribe: {}'.format(error))
         else:
-            self.check_remote_peers(result)
+            # Save for later analysis
+            self.remote_peers = result
         self.close_if_done()
-
-    def check_remote_peers(self, updates):
-        '''When a peer gives us a peer update.
-
-        Each update is expected to be of the form:
-            [ip_addr, hostname, ['v1.0', 't51001', 's51002']]
-        '''
-        try:
-            real_names = [' '.join([u[1]] + u[2]) for u in updates]
-            peers = [Peer.from_real_name(real_name, str(self.peer))
-                     for real_name in real_names]
-        except Exception:
-            self.log_error('bad server.peers.subscribe response')
-            return
-
-        self.peer_mgr.add_peers(peers)
-
-        # Announce ourself if not present.  Don't if disabled or we
-        # are a non-public IP address.
-        if not self.peer_mgr.env.peer_announce:
-            return
-        my = self.peer_mgr.my_clearnet_peer()
-        if not my.is_public:
-            return
-        for peer in my.matches(peers):
-            if peer.tcp_port == my.tcp_port and peer.ssl_port == my.ssl_port:
-                return
-
-        self.log_info('registering ourself with server.add_peer')
-        self.send_request(self.on_add_peer, 'server.add_peer', [my.features])
 
     def on_add_peer(self, result, error):
-        '''Handle the response to the add_peer message.'''
-        self.close_if_done()
-
-    def peer_verified(self, is_good):
-        '''Call when it has been determined whether or not the peer seems to
-        be on the same network.
-        '''
-        if is_good:
-            self.send_request(self.on_peers_subscribe,
-                              'server.peers.subscribe')
-        else:
-            self.peer.mark_bad()
-            self.failed = True
+        '''We got a response the add_peer message.'''
+        # This is the last thing we were waiting for; shutdown the connection
+        self.shutdown_connection()
 
     def on_features(self, features, error):
         # Several peers don't implement this.  If they do, check they are
         # the same network with the genesis hash.
-        verified = False
         if not error and isinstance(features, dict):
             our_hash = self.peer_mgr.env.coin.GENESIS_HASH
             if our_hash != features.get('genesis_hash'):
-                self.peer_verified(False)
+                self.bad = True
                 self.log_warning('incorrect genesis hash')
             else:
-                self.peer_verified(True)
                 self.peer.update_features(features)
-                verified = True
-        # For legacy peers not implementing features, check their height
-        # as a proxy to determining they're on our network
-        if not verified and not self.peer.bad:
-            self.send_request(self.on_headers, 'blockchain.headers.subscribe')
         self.close_if_done()
 
     def on_headers(self, result, error):
@@ -165,16 +124,18 @@ class PeerSession(JSONSession):
             self.failed = True
             self.log_error('blockchain.headers.subscribe returned an error')
         elif not isinstance(result, dict):
+            self.bad = True
             self.log_error('bad blockchain.headers.subscribe response')
-            self.peer_verified(False)
         else:
             our_height = self.peer_mgr.controller.bp.db_height
             their_height = result.get('block_height')
-            is_good = (isinstance(their_height, int) and
-                       abs(our_height - their_height) <= 5)
-            self.peer_verified(is_good)
-            if not is_good:
-                self.log_warning('bad height {}'.format(their_height))
+            if not isinstance(their_height, int):
+                self.log_warning('invalid height {}'.format(their_height))
+                self.bad = True
+            elif abs(our_height - their_height) > 5:
+                self.log_warning('bad height {:,d} (ours: {:,d})'
+                                 .format(their_height, our_height))
+                self.bad = True
         self.close_if_done()
 
     def on_version(self, result, error):
@@ -187,19 +148,63 @@ class PeerSession(JSONSession):
             self.peer.features['server_version'] = result
         self.close_if_done()
 
+    def check_remote_peers(self):
+        '''Check the peers list we got from a remote peer.
+
+        Each update is expected to be of the form:
+            [ip_addr, hostname, ['v1.0', 't51001', 's51002']]
+
+        Call add_peer if the remote doesn't appear to know about us.
+        '''
+        try:
+            real_names = [' '.join([u[1]] + u[2]) for u in self.remote_peers]
+            peers = [Peer.from_real_name(real_name, str(self.peer))
+                     for real_name in real_names]
+        except Exception:
+            self.log_error('bad server.peers.subscribe response')
+            return
+
+        self.peer_mgr.add_peers(peers)
+
+        # Announce ourself if not present.  Don't if disabled, we
+        # are a non-public IP address, or to ourselves.
+        if not self.peer_mgr.env.peer_announce:
+            return
+        if self.peer in self.peer_mgr.myselves:
+            return
+        my = self.peer_mgr.my_clearnet_peer()
+        if not my.is_public:
+            return
+        for peer in my.matches(peers):
+            if peer.tcp_port == my.tcp_port and peer.ssl_port == my.ssl_port:
+                return
+
+        self.log_info('registering ourself with server.add_peer')
+        self.send_request(self.on_add_peer, 'server.add_peer', [my.features])
+
     def close_if_done(self):
         if not self.has_pending_requests():
-            is_good = not self.failed
-            self.peer_mgr.set_connection_status(self.peer, is_good)
-            if self.peer.is_tor:
-                how = 'via {} over Tor'.format(self.kind)
-            else:
-                how = 'via {} at {}'.format(self.kind,
-                                            self.peer_addr(anon=False))
-            status = 'verified' if is_good else 'failed to verify'
-            elapsed = time.time() - self.peer.last_try
-            self.log_info('{} {} in {:.1f}s'.format(status, how, elapsed))
-            self.close_connection()
+            if self.bad:
+                self.peer.mark_bad()
+            elif self.remote_peers:
+                self.check_remote_peers()
+            # We might now be waiting for an add_peer response
+            if not self.has_pending_requests():
+                self.shutdown_connection()
+
+    def shutdown_connection(self):
+        self.peer.last_connect = time.time()
+        is_good = not (self.failed or self.bad)
+        self.peer_mgr.set_connection_status(self.peer, is_good)
+        if self.peer.is_tor:
+            how = 'via {} over Tor'.format(self.kind)
+        else:
+            how = 'via {} at {}'.format(self.kind,
+                                        self.peer_addr(anon=False))
+        status = 'verified' if is_good else 'failed to verify'
+        elapsed = time.time() - self.peer.last_try
+        self.log_info('{} {} in {:.1f}s'.format(status, how, elapsed))
+        self.close_connection()
 
 
 class PeerManager(util.LoggedClass):
@@ -224,6 +229,7 @@ class PeerManager(util.LoggedClass):
         # any other peers with the same host name or IP address.
         self.peers = set()
         self.onion_peers = []
+        self.permit_onion_peer_time = time.time()
         self.last_tor_retry_time = 0
         self.tor_proxy = SocksProxy(env.tor_proxy_host, env.tor_proxy_port,
                                     loop=self.loop)
@@ -273,12 +279,12 @@ class PeerManager(util.LoggedClass):
 
         return [peer_data(peer) for peer in sorted(self.peers, key=peer_key)]
 
-    def add_peers(self, peers, limit=3, check_ports=False, source=None):
+    def add_peers(self, peers, limit=2, check_ports=False, source=None):
         '''Add a limited number of peers that are not already present.'''
         retry = False
         new_peers = []
         for peer in peers:
-            if not peer.is_valid:
+            if not peer.is_public:
                 continue
             matches = peer.matches(self.peers)
             if not matches:
@@ -305,15 +311,45 @@ class PeerManager(util.LoggedClass):
         if retry:
             self.retry_event.set()
 
-    def on_add_peer(self, features, source):
-        '''Add peers from an incoming connection.'''
+    def permit_new_onion_peer(self):
+        '''Accept a new onion peer only once per random time interval.'''
+        now = time.time()
+        if now < self.permit_onion_peer_time:
+            return False
+        self.permit_onion_peer_time = now + random.randrange(0, 1200)
+        return True
+
+    async def on_add_peer(self, features, source_info):
+        '''Add a peer (but only if the peer resolves to the source).'''
+        if not source_info:
+            self.log_info('ignored add_peer request: no source info')
+            return False
+        source = source_info[0]
         peers = Peer.peers_from_features(features, source)
-        if peers:
-            hosts = [peer.host for peer in peers]
-            self.log_info('add_peer request from {} for {}'
-                          .format(source, ', '.join(hosts)))
-            self.add_peers(peers, check_ports=True)
-        return bool(peers)
+        if not peers:
+            self.log_info('ignored add_peer request: no peers given')
+            return False
+
+        # Just look at the first peer, require it
+        peer = peers[0]
+        host = peer.host
+        if peer.is_tor:
+            permit = self.permit_new_onion_peer()
+            reason = 'rate limiting'
+        else:
+            infos = await self.loop.getaddrinfo(host, 80, type=SOCK_STREAM)
+            permit = any(source == info[-1][0] for info in infos)
+            reason = 'source-destination mismatch'
+
+        if permit:
+            self.log_info('accepted add_peer request from {} for {}'
+                          .format(source, host))
+            self.add_peers([peer], check_ports=True)
+        else:
+            self.log_warning('rejected add_peer request from {} for {} ({})'
+                             .format(source, host, reason))
+
+        return permit
 
     def on_peers_subscribe(self, is_tor):
         '''Returns the server peers as a list of (ip, host, details) tuples.
@@ -373,7 +409,12 @@ class PeerManager(util.LoggedClass):
             if data:
                 version, items = ast.literal_eval(data)
                 if version == 1:
-                    peers = [Peer.deserialize(item) for item in items]
+                    peers = []
+                    for item in items:
+                        try:
+                            peers.append(Peer.deserialize(item))
+                        except Exception:
+                            pass
                     self.add_peers(peers, source='peers file', limit=None)
 
     def import_peers(self):
@@ -514,7 +555,6 @@ class PeerManager(util.LoggedClass):
         '''Called when a connection succeeded or failed.'''
         if good:
             peer.try_count = 0
-            peer.last_connect = time.time()
             peer.source = 'peer'
             # Remove matching IP addresses
             for match in peer.matches(self.peers):
@@ -525,11 +565,11 @@ class PeerManager(util.LoggedClass):
 
     def maybe_forget_peer(self, peer):
         '''Forget the peer if appropriate, e.g. long-term unreachable.'''
-        if peer.bad:
-            forget = peer.last_connect < time.time() - STALE_SECS // 2
+        if peer.last_connect and not peer.bad:
+            try_limit = 10
         else:
-            try_limit = 10 if peer.last_connect else 3
-            forget = peer.try_count >= try_limit
+            try_limit = 3
+        forget = peer.try_count >= try_limit
 
         if forget:
             desc = 'bad' if peer.bad else 'unreachable'

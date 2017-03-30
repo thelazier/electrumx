@@ -45,7 +45,6 @@ class SessionBase(JSONSession):
         self.bw_time = self.start_time
         self.bw_interval = 3600
         self.bw_used = 0
-        self.peer_added = False
 
     def close_connection(self):
         '''Call this to close the connection.'''
@@ -209,15 +208,10 @@ class ElectrumX(SessionBase):
         self.subscribe_height = True
         return self.height()
 
-    def add_peer(self, features):
-        '''Add a peer.'''
-        if self.peer_added:
-            return False
+    async def add_peer(self, features):
+        '''Add a peer (but only if the peer resolves to the source).'''
         peer_mgr = self.controller.peer_mgr
-        peer_info = self.peer_info()
-        source = peer_info[0] if peer_info else 'unknown'
-        self.peer_added = peer_mgr.on_add_peer(features, source)
-        return self.peer_added
+        return await peer_mgr.on_add_peer(features, self.peer_info())
 
     def peers_subscribe(self):
         '''Return the server peers as a list of (ip, host, details) tuples.'''

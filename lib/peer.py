@@ -28,7 +28,7 @@
 import re
 from ipaddress import ip_address
 
-from lib.util import cachedproperty
+from lib.util import cachedproperty, is_valid_hostname
 
 
 class Peer(object):
@@ -39,9 +39,7 @@ class Peer(object):
              # metadata
              'source', 'ip_addr', 'good_ports',
              'last_connect', 'last_try', 'try_count')
-    PORTS = ('ssl_port', 'tcp_port')
-    FEATURES = PORTS + ('pruning', 'server_version',
-                        'protocol_min', 'protocol_max')
+    FEATURES = ('pruning', 'server_version', 'protocol_min', 'protocol_max')
     # This should be set by the application
     DEFAULT_PORTS = {}
 
@@ -51,6 +49,7 @@ class Peer(object):
         a dictionary of features, and a record of the source.'''
         assert isinstance(host, str)
         assert isinstance(features, dict)
+        assert host in features.get('hosts', {})
         self.host = host
         self.features = features.copy()
         # Canonicalize / clean-up
@@ -107,10 +106,14 @@ class Peer(object):
 
     def update_features(self, features):
         '''Update features in-place.'''
-        tmp = Peer(self.host, features)
-        self.features = tmp.features
-        for feature in self.FEATURES:
-            setattr(self, feature, getattr(tmp, feature))
+        try:
+            tmp = Peer(self.host, features)
+        except Exception:
+            pass
+        else:
+            self.features = tmp.features
+            for feature in self.FEATURES:
+                setattr(self, feature, getattr(tmp, feature))
 
     def connection_port_pairs(self):
         '''Return a list of (kind, port) pairs to try when making a
@@ -146,7 +149,7 @@ class Peer(object):
         if ip:
             return ((ip.is_global or ip.is_private)
                     and not (ip.is_multicast or ip.is_unspecified))
-        return True
+        return is_valid_hostname(self.host)
 
     @cachedproperty
     def is_public(self):
@@ -154,7 +157,7 @@ class Peer(object):
         if ip:
             return self.is_valid and not ip.is_private
         else:
-            return self.host != 'localhost'
+            return self.is_valid and self.host != 'localhost'
 
     @cachedproperty
     def ip_address(self):

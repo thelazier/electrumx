@@ -8,7 +8,9 @@
 '''Class for handling environment configuration and defaults.'''
 
 
+import resource
 from collections import namedtuple
+from ipaddress import ip_address
 from os import environ
 
 from lib.coins import Coin
@@ -59,7 +61,7 @@ class Env(LoggedClass):
         # Server limits to help prevent DoS
         self.max_send = self.integer('MAX_SEND', 1000000)
         self.max_subs = self.integer('MAX_SUBS', 250000)
-        self.max_sessions = self.integer('MAX_SESSIONS', 1000)
+        self.max_sessions = self.sane_max_sessions()
         self.max_session_subs = self.integer('MAX_SESSION_SUBS', 50000)
         self.bandwidth_limit = self.integer('BANDWIDTH_LIMIT', 2000000)
         self.session_timeout = self.integer('SESSION_TIMEOUT', 600)
@@ -68,16 +70,17 @@ class Env(LoggedClass):
         self.irc_nick = self.default('IRC_NICK', None)
 
         # Identities
+        report_host = self.default('REPORT_HOST', self.host)
+        self.check_report_host(report_host)
         main_identity = NetIdentity(
-            self.default('REPORT_HOST', self.host),
+            report_host,
             self.integer('REPORT_TCP_PORT', self.tcp_port) or None,
             self.integer('REPORT_SSL_PORT', self.ssl_port) or None,
             ''
         )
-        if not main_identity.host.strip():
-            raise self.Error('IRC host is empty')
         if main_identity.tcp_port == main_identity.ssl_port:
-            raise self.Error('IRC TCP and SSL ports are the same')
+            raise self.Error('REPORT_TCP_PORT and REPORT_SSL_PORT are both {}'
+                             .format(main_identity.tcp_port))
 
         self.identities = [main_identity]
         tor_host = self.default('REPORT_HOST_TOR', '')
@@ -113,6 +116,30 @@ class Env(LoggedClass):
         except Exception:
             raise self.Error('cannot convert envvar {} value {} to an integer'
                              .format(envvar, value))
+
+    def sane_max_sessions(self):
+        '''Return the maximum number of sessions to permit.  Normally this
+        is MAX_SESSIONS.  However, to prevent open file exhaustion, ajdust
+        downwards if running with a small open file rlimit.'''
+        env_value = self.integer('MAX_SESSIONS', 1000)
+        nofile_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        # We give the DB 250 files; allow ElectrumX 100 for itself
+        value = max(0, min(env_value, nofile_limit - 350))
+        if value < env_value:
+            self.log_warning('lowered maximum seessions from {:,d} to {:,d} '
+                             'because your open file limit is {:,d}'
+                             .format(env_value, value, nofile_limit))
+        return value
+
+    def check_report_host(self, host):
+        try:
+            ip = ip_address(host)
+        except ValueError:
+            bad = not bool(host.strip())
+        else:
+            bad = ip.is_multicast or ip.is_unspecified
+        if bad:
+            raise self.Error('"{}" is not a valid REPORT_HOST'.format(host))
 
     def obsolete(self, envvars):
         bad = [envvar for envvar in envvars if environ.get(envvar)]

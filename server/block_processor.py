@@ -1,4 +1,5 @@
 # Copyright (c) 2016-2017, Neil Booth
+# Copyright (c) 2017, the ElectrumX authors
 #
 # All rights reserved.
 #
@@ -231,15 +232,15 @@ class BlockProcessor(server.db.DB):
                                 .format(len(blocks), first, self.height + 1))
             return
 
-        headers = [self.coin.block_header(block, first + n)
-                   for n, block in enumerate(blocks)]
+        blocks = [self.coin.block_full(block, first + n)
+                         for n, block in enumerate(blocks)]
+        headers = [b.header for b in blocks]
         hprevs = [self.coin.header_prevhash(h) for h in headers]
         chain = [self.tip] + [self.coin.header_hash(h) for h in headers[:-1]]
 
         if hprevs == chain:
             start = time.time()
-            await self.controller.run_in_executor(self.advance_blocks,
-                                                  blocks, headers)
+            await self.controller.run_in_executor(self.advance_blocks, blocks)
             if not self.first_sync:
                 s = '' if len(blocks) == 1 else 's'
                 self.logger.info('processed {:,d} block{} in {:.1f}s'
@@ -291,11 +292,13 @@ class BlockProcessor(server.db.DB):
 
         The hashes are returned in order of increasing height.'''
 
-        def match_pos(hashes1, hashes2):
+        def diff_pos(hashes1, hashes2):
+            '''Returns the index of the first difference in the hash lists.
+            If both lists match returns their length.'''
             for n, (hash1, hash2) in enumerate(zip(hashes1, hashes2)):
-                if hash1 == hash2:
+                if hash1 != hash2:
                     return n
-            return -1
+            return len(hashes)
 
         if count is None:
             # A real reorg
@@ -305,9 +308,9 @@ class BlockProcessor(server.db.DB):
                 hashes = self.fs_block_hashes(start, count)
                 hex_hashes = [hash_to_str(hash) for hash in hashes]
                 d_hex_hashes = await self.daemon.block_hex_hashes(start, count)
-                n = match_pos(hex_hashes, d_hex_hashes)
-                if n >= 0:
-                    start += n + 1
+                n = diff_pos(hex_hashes, d_hex_hashes)
+                if n > 0:
+                    start += n
                     break
                 count = min(count * 2, start)
                 start -= count
@@ -477,21 +480,21 @@ class BlockProcessor(server.db.DB):
         if utxo_MB + hist_MB >= self.cache_MB or hist_MB >= self.cache_MB // 5:
             self.flush(utxo_MB >= self.cache_MB * 4 // 5)
 
-    def advance_blocks(self, blocks, headers):
+    def advance_blocks(self, blocks):
         '''Synchronously advance the blocks.
 
         It is already verified they correctly connect onto our tip.
         '''
-        block_txs = self.coin.block_txs
         min_height = self.min_undo_height(self.daemon.cached_height())
         height = self.height
 
         for block in blocks:
             height += 1
-            undo_info = self.advance_txs(block_txs(block, height))
+            undo_info = self.advance_txs(block.transactions)
             if height >= min_height:
                 self.undo_infos.append((undo_info, height))
 
+        headers = [block.header for block in blocks]
         self.height = height
         self.headers.extend(headers)
         self.tip = self.coin.header_hash(headers[-1])
@@ -566,14 +569,14 @@ class BlockProcessor(server.db.DB):
         coin = self.coin
         for block in blocks:
             # Check and update self.tip
-            header = coin.block_header(block, self.height)
-            header_hash = coin.header_hash(header)
+            block_full = coin.block_full(block, self.height)
+            header_hash = coin.header_hash(block_full.header)
             if header_hash != self.tip:
                 raise ChainError('backup block {} not tip {} at height {:,d}'
                                  .format(hash_to_str(header_hash),
                                          hash_to_str(self.tip), self.height))
-            self.tip = coin.header_prevhash(header)
-            self.backup_txs(coin.block_txs(block, self.height))
+            self.tip = coin.header_prevhash(block_full.header)
+            self.backup_txs(block_full.transactions)
             self.height -= 1
             self.tx_counts.pop()
 
