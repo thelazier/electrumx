@@ -41,8 +41,8 @@ from lib.hash import Base58, hash160, double_sha256, hash_to_str
 from lib.script import ScriptPubKey
 from lib.tx import Deserializer, DeserializerSegWit, DeserializerAuxPow, DeserializerZcash
 from server.block_processor import BlockProcessor
-from server.daemon import Daemon
-from server.session import ElectrumX
+from server.daemon import Daemon, DashDaemon
+from server.session import ElectrumX, DashElectrumX
 
 Block = namedtuple("Block", "header transactions")
 
@@ -572,8 +572,6 @@ class DogecoinTestnet(Dogecoin):
 
 # Source: https://github.com/dashpay/dash
 class Dash(Coin):
-    from server.session import DashElectrumX
-    from server.daemon import DashDaemon
     NAME = "Dash"
     SHORTNAME = "DASH"
     NET = "mainnet"
