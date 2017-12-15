@@ -732,8 +732,8 @@ class Dash(Coin):
     @classmethod
     def header_hash(cls, header):
         '''Given a header return the hash.'''
-        import x11_hash
-        return x11_hash.getPoWHash(header)
+        import dash_hash
+        return dash_hash.getPoWHash(header)
 
 
 class DashTestnet(Dash):
